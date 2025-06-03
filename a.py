@@ -507,7 +507,7 @@ class MetaAdsScraperApp:
         try:
             driver = self.init_driver()
             search_url = (
-                f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
+                f"https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
                 f"&country={country}&q={keyword}&sort_data[direction]=desc&sort_data[mode]=relevancy_monthly_grouped&search_type=keyword_unordered"
             )
             self.log_message(f"Searching for ads with keyword: {keyword}")
