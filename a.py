@@ -17,6 +17,7 @@ from selenium.webdriver.support import expected_conditions as EC
 import undetected_chromedriver as uc
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import torch
 from transformers import pipeline
 from deep_translator import GoogleTranslator
 from langdetect import detect
@@ -53,10 +54,17 @@ DEFAULT_ACTIVE_DAYS = 1.0
 CONFIDENCE_THRESHOLD = 0.3
 translation_cache = {}
 
+# Initialize classifier with GPU/CPU handling
+device = 0 if torch.cuda.is_available() else -1  # 0 for GPU, -1 for CPU
+print(f"Using device: {'GPU' if device >= 0 else 'CPU'}")
+
 try:
-    classifier = pipeline("zero-shot-classification", 
-                         model="valhalla/distilbart-mnli-12-3", 
-                         tokenizer="valhalla/distilbart-mnli-12-3")
+    classifier = pipeline(
+        "zero-shot-classification",
+        model="valhalla/distilbart-mnli-12-3",
+        tokenizer="valhalla/distilbart-mnli-12-3",
+        device=device
+    )
     INDUSTRIES = list(BENCHMARKS.keys())
 except Exception as e:
     print(f"⚠️ Error loading HuggingFace model: {e}. Falling back to default metrics.")
@@ -196,7 +204,6 @@ class MetaAdsScraperApp:
         results_frame = ttkb.LabelFrame(self.right_pane, text="Top 5 Ads", padding=10)
         results_frame.pack(fill=BOTH, expand=True, pady=5)
         
-        # Add ranking criteria explanation
         ttkb.Label(results_frame, text="Ads are ranked by activity duration (hours active).", font=("Helvetica", 10, "italic")).pack(anchor=W, pady=5)
         
         self.canvas = tk.Canvas(results_frame, highlightthickness=0)
@@ -286,7 +293,7 @@ class MetaAdsScraperApp:
 
     def create_ad_card(self, index, ad, metric, media_paths):
         card_frame = ttkb.Frame(self.scrollable_frame, padding=15, style="Card.TFrame", relief=RAISED, borderwidth=2)
-        card_frame.pack(fill=X, pady=20)  # Single column, increased pady for spacing
+        card_frame.pack(fill=X, pady=20)
         
         card_frame.bind("<Enter>", lambda e: card_frame.configure(style="CardHover.TFrame"))
         card_frame.bind("<Leave>", lambda e: card_frame.configure(style="Card.TFrame"))
@@ -310,7 +317,6 @@ class MetaAdsScraperApp:
         ttkb.Label(details_frame, text=f"Rank {index}: {metric['Advertiser']}", font=("Helvetica", 12, "bold")).pack(anchor=W)
         ttkb.Label(details_frame, text=ad["Ad Text"][:80] + ("..." if len(ad["Ad Text"]) > 80 else ""), wraplength=400, justify=LEFT, font=("Helvetica", 9)).pack(anchor=W, pady=2)
         
-        # Add ranking explanation
         ttkb.Label(details_frame, text=f"Ranked due to: {ad['Hours Active']:.2f} hours active", font=("Helvetica", 8, "italic"), foreground="gray").pack(anchor=W, pady=2)
         
         ttkb.Separator(details_frame, orient=HORIZONTAL).pack(fill=X, pady=5)
@@ -626,7 +632,7 @@ class MetaAdsScraperApp:
 
     def download_all_media(self, ad, ad_index):
         media_paths = []
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:  # Reduced for stability
             futures = []
             for j, img_url in enumerate(ad["Image URLs"], 1):
                 filename_base = f"ad_{ad_index}_{ad['Advertiser']}_image_{j}"
@@ -665,11 +671,16 @@ class MetaAdsScraperApp:
         if classifier is None:
             return [{"Industry": "Software Development", "Confidence": 0.0, "Note": "Manual review needed - No classifier"}] * len(ad_texts)
         try:
-            results = classifier(ad_texts, candidate_labels=INDUSTRIES, multi_label=False)
-            if isinstance(results, dict):
-                results = [results]
+            results = []
+            batch_size = 8  # Adjust based on GPU memory
+            for i in range(0, len(ad_texts), batch_size):
+                batch_texts = ad_texts[i:i + batch_size]
+                batch_results = classifier(batch_texts, candidate_labels=INDUSTRIES, multi_label=False)
+                if isinstance(batch_results, dict):
+                    batch_results = [batch_results]
+                results.extend(batch_results)
             return [{
-                "Industry": result["labels"][0], 
+                "Industry": result["labels"][0],
                 "Confidence": result["scores"][0],
                 "Note": f"Low confidence ({result['scores'][0]:.2f}) - Manual review needed" if result["scores"][0] < CONFIDENCE_THRESHOLD else ""
             } for result in results]
@@ -790,7 +801,7 @@ class MetaAdsScraperApp:
             if ad_key not in seen_keys and (ad["Image URLs"] or ad["Video URLs"]):
                 top_ads.append(ad)
                 seen_keys.add(ad_key)
-            if len(top_ads) == 5:
+            if len(top_ads) == 20:
                 break
         
         if not top_ads:
